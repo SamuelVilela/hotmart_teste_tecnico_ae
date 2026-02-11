@@ -1,10 +1,13 @@
-CREATE OR REPLACE TEMP VIEW product_item_state AS
-SELECT
-  prod_item_id,
-  prod_item_partition,
-  MAX_BY(product_id, transaction_datetime) AS product_id,
-  MAX_BY(item_quantity, transaction_datetime) AS item_quantity,
-  MAX_BY(purchase_value, transaction_datetime) AS unit_price
-FROM product_item
-WHERE transaction_date < CURRENT_DATE()
-GROUP BY prod_item_id, prod_item_partition;
+CREATE OR REPLACE TEMP VIEW product_item_state AS WITH pi_rn AS
+  (SELECT prod_item_id,
+          prod_item_partition,
+          product_id,
+          item_quantity,
+          purchase_value,
+          ROW_NUMBER() OVER (PARTITION prod_item_id, prod_item_partition
+                             ORDER BY transaction_datetime DESC) AS rn
+   FROM product_item
+   WHERE transaction_date < CURRENT_DATE())
+SELECT *
+FROM pi_rn
+WHERE rn =1;
