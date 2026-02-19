@@ -20,22 +20,19 @@ def main():
     job = Job(glueContext)
     job.init(args['JOB_NAME'], args)
 
-    # Definição dos caminhos que a função exige
-    delta_path = args['S3_DELTA_PATH'] # Ex: s3://bucket-gold/final/
-    history_path = f"{delta_path.rstrip('/')}_history/" # Gerado pelo script
-    gold_monthly_path = f"{delta_path.rstrip('/')}_monthly/" # Gerado pelo script
+    delta_path = args['S3_DELTA_PATH'] 
+    history_path = f"{delta_path.rstrip('/')}_history/" 
+    gold_monthly_path = f"{delta_path.rstrip('/')}_monthly/" 
 
     dates = get_dates_to_process(args)
 
     for current_date in dates:
         date_str = current_date.strftime('%Y-%m-%d')
         
-        # Leitura das views (usando a lógica de tabela vazia se assíncrono)
         get_bronze_view(spark, args['S3_BUCKET_BRONZE'], "purchase", current_date)
         get_bronze_view(spark, args['S3_BUCKET_BRONZE'], "product_item", current_date)
         get_bronze_view(spark, args['S3_BUCKET_BRONZE'], "extra_info", current_date)
 
-        # AGORA COM TODOS OS ARGUMENTOS:
         run_silver_gold_logic(
             spark, 
             date_str, 

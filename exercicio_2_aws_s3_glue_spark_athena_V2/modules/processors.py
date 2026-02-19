@@ -4,12 +4,8 @@ from pyspark.sql.functions import (
 from delta.tables import DeltaTable
 
 def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, gold_monthly_path):
-    # 1. Normalização da Data (Crucial para o replaceWhere)
     only_date = processing_date[:10]
-    print(f"### [START] Processing date: {only_date}")
-
-    # 2. Criação das Views de Estado (Deduplicação)
-    # Executamos aqui para garantir que o catálogo as conheça antes do join
+    
     spark.sql("""
     CREATE OR REPLACE TEMP VIEW purchase_state AS
     SELECT purchase_id, 
@@ -42,10 +38,8 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
     FROM extra_info_eventos GROUP BY purchase_id
     """)
 
-    # 3. Preparação do Histórico para Enriquecimento Individual
     history_df = None
     if DeltaTable.isDeltaTable(spark, history_path):
-        print("### [INFO] Histórico encontrado. Enriquecendo views.")
         history_df = DeltaTable.forPath(spark, history_path).toDF().filter(col("is_current") == True)
 
     def enrich_state(current_view_name, history_df, join_cols):
@@ -59,7 +53,6 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
                     ))
         return current_df
 
-    # Colunas que queremos "herdar" caso não venham no processamento de hoje
     purchase_cols = ["buyer_id", "producer_id", "prod_item_id", "purchase_status", "release_date", "order_date", "transaction_date"]
     product_cols = ["product_id", "item_quantity", "unit_price", "prod_item_id", "transaction_date"]
     extra_cols = ["subsidiary", "transaction_date"]
@@ -68,7 +61,6 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
     pr_enriched = enrich_state("product_state", history_df, product_cols)
     e_enriched = enrich_state("extra_state", history_df, extra_cols)
 
-    # 4. Snapshot Base (Full Join para não perder dados se purchase falhar)
     snapshot = (p_enriched.alias("p")
                 .join(pr_enriched.alias("pr"), "purchase_id", "full")
                 .join(e_enriched.alias("e"), "purchase_id", "full")
@@ -89,21 +81,16 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
                     (coalesce(col("pr.item_quantity"), lit(0)) * coalesce(col("pr.unit_price"), lit(0))).alias("item_gmv")
                 ))
 
-    # 5. Escrita no Snapshot (Silver)
-
     snapshot_to_save = snapshot.filter(col("transaction_date") == lit(only_date))
     
     final_count = snapshot_to_save.count()
-    print(f"### [WRITE] Total registros Snapshot para {only_date}: {final_count}")
-
+    
     if final_count > 0:
         (snapshot_to_save.write.format("delta")
             .mode("overwrite")
             .option("replaceWhere", f"transaction_date = '{only_date}'")
             .save(snapshot_path))
 
-    # 6. SCD2 History (Merge com todas as colunas no Hash)
-    # O hash_diff garante que se o status ou a data mudarem, criamos nova linha
     snapshot_scd = snapshot.withColumn(
         "hash_diff",
         sha2(concat_ws("||", 
@@ -121,7 +108,6 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
     )
 
     if not DeltaTable.isDeltaTable(spark, history_path):
-        print("### [WRITE] Criando histórico SCD2 inicial")
         (snapshot_scd
             .withColumn("valid_from", col("transaction_date"))
             .withColumn("valid_to", lit(None).cast("date"))
@@ -129,7 +115,6 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
             .withColumn("created_at", current_timestamp())
             .write.format("delta").mode("overwrite").save(history_path))
     else:
-        print("### [MERGE] Executando Merge SCD2")
         history_table = DeltaTable.forPath(spark, history_path)
         
         # Identifica quem mudou para fechar a versão antiga
@@ -161,7 +146,6 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
             }
         ).execute()
 
-    # 7. GOLD - Monthly GMV (Usando a data limpa)
     monthly_gmv = (
         snapshot
         .withColumn("reference_month", trunc(col("transaction_date"), "month"))
@@ -171,7 +155,6 @@ def run_silver_gold_logic(spark, processing_date, snapshot_path, history_path, g
         .withColumn("created_at", current_timestamp())
     )
 
-    print(f"### [WRITE] Salvando Gold Monthly")
     (monthly_gmv.write.format("delta")
         .mode("overwrite")
         .partitionBy("as_of_date") # Permite navegar entre fechamentos de dias diferentes
